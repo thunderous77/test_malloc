@@ -1,7 +1,7 @@
 /*
- * mm-EFL.c - Using explicit free list and implement first fit, best fit and
- * first-best fit. The performance of this implementation is relatively
- * good using first best fit(detailed in report).
+ * mm-EFL.c - modify on the basis of mm-EFL-base.c, change the double linked
+ * list of free block to a single linked list. The performance is a little
+ * better than mm-EFL.c(score 92).
  */
 #include <assert.h>
 #include <stddef.h>
@@ -41,7 +41,7 @@
 
 #define WSIZE 4            /* header/footer size (bytes) */
 #define DSIZE 8            /* double word size (bytes) */
-#define BSIZE 16           /* empty block size (bytes) */
+#define BSIZE 12           /* empty block size (bytes) */
 #define CHUNKSIZE (1 << 8) /* extend heap size (bytes) */
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
@@ -53,14 +53,13 @@
 #define WRITE(ptr, val)                                                        \
   ((*(unsigned int *)(ptr)) =                                                  \
        (unsigned int)(val))              /* write a word at address ptr */
-#define GET_SIZE(ptr) (READ(ptr) & ~0x7) /* get size of a block */
+#define GET_SIZE(ptr) (READ(ptr) & ~0x3) /* get size of a block */
 #define GET_ALLOC(ptr) (READ(ptr) & 0x1)
 /* get alloc bit of a block,  0 -> unallocated, 1 -> allocated */
 
 #define HEADER(ptr)                                                            \
-  ((char *)(ptr)-DSIZE -                                                       \
-   WSIZE) /* given block ptr, get header address of a block                    \
-           */
+  ((char *)(ptr)-DSIZE) /* given block ptr, get header address of a block      \
+                         */
 #define FOOTER(ptr)                                                            \
   ((char *)(ptr) + GET_SIZE(HEADER(ptr)) -                                     \
    BSIZE) /* given block ptr, get footer address of a block */
@@ -70,21 +69,11 @@
 #define PREV_BLOCK(ptr)                                                        \
   ((char *)(ptr)-GET_SIZE(                                                     \
       ((char *)(ptr)-BSIZE))) /* given block ptr, get previous block ptr */
-#define GET_PREV_FREE_BLOCK(ptr)                                               \
-  ((READ((char *)(ptr)-DSIZE)) == 0                                            \
-       ? NULL                                                                  \
-       : ((int *)((long)(READ((char *)(ptr)-DSIZE)) +                          \
-                  (long)(heap_list)))) /* get previous free block ptr */
 #define GET_NEXT_FREE_BLOCK(ptr)                                               \
   ((READ((char *)(ptr)-WSIZE)) == 0                                            \
        ? NULL                                                                  \
        : ((int *)((long)(READ((char *)(ptr)-WSIZE)) +                          \
                   (long)(heap_list)))) /* get next free block ptr */
-#define SET_PREV_FREE_BLOCK(ptr, val)                                          \
-  (val == 0                                                                    \
-       ? (WRITE(((char *)(ptr)-DSIZE), (val)))                                 \
-       : (WRITE(((char *)(ptr)-DSIZE),                                         \
-                (val - (long)(heap_list))))) /* set previous free block ptr */
 #define SET_NEXT_FREE_BLOCK(ptr, val)                                          \
   (val == 0                                                                    \
        ? (WRITE(((char *)(ptr)-WSIZE), (val)))                                 \
@@ -97,7 +86,7 @@
 #define FIRST_BEST_FIT
 
 #ifdef FIRST_BEST_FIT
-#define MAX_SEARCH_FREE_BLOCK 15
+#define MAX_SEARCH_FREE_BLOCK 10
 #endif
 
 static char *heap_list;
@@ -128,6 +117,7 @@ static void remove_free_block(void *ptr);
 static void insert_free_block(void *ptr);
 
 static void *extend_heap(size_t heap_size) {
+  // printf("extend heap begin\n");
   cur_func = 1;
   char *new_ptr;
 
@@ -136,19 +126,28 @@ static void *extend_heap(size_t heap_size) {
 
   // we don't move the new_ptr forward  because we use the
   // place of the old end block as the new block's header,
-  // both 12 bytes
+  // both 8 bytes
   WRITE(HEADER(new_ptr), PACK(heap_size, 0));
   WRITE(FOOTER(new_ptr), PACK(heap_size, 0));
-  SET_PREV_FREE_BLOCK(new_ptr, 0);
   SET_NEXT_FREE_BLOCK(new_ptr, 0);
   WRITE(HEADER(NEXT_BLOCK(new_ptr)), PACK(0, 1));
 
+  // printf("extend heap end\n");
   return merge_block(new_ptr);
 }
 
 static void *merge_block(void *ptr) {
+  // printf("merge block begin at %p\n", ptr);
   cur_func = 2;
+  // printf("read at %p,size is %d\n", (char *)ptr - BSIZE,
+  //        GET_SIZE((char *)ptr - BSIZE));
+  // printf("previous block at %p, size %d, alloc %d\n", PREV_BLOCK(ptr),
+  //        GET_SIZE(HEADER(PREV_BLOCK(ptr))),
+  //        GET_ALLOC(HEADER(PREV_BLOCK(ptr))));
   size_t pre_alloc = GET_ALLOC(HEADER(PREV_BLOCK(ptr)));
+  // printf("next block at %p, size %d, alloc %d\n", NEXT_BLOCK(ptr),
+  //        GET_SIZE(HEADER(NEXT_BLOCK(ptr))),
+  //        GET_ALLOC(HEADER(NEXT_BLOCK(ptr))));
   size_t nxt_alloc = GET_ALLOC(HEADER(NEXT_BLOCK(ptr)));
   size_t block_size = GET_SIZE(HEADER(ptr));
 
@@ -176,10 +175,12 @@ static void *merge_block(void *ptr) {
     ptr = PREV_BLOCK(ptr);
   }
   insert_free_block(ptr);
+  // printf("merge block end\n");
   return ptr;
 }
 
 static void *find_fitted_block(size_t block_size) {
+  // printf("find fitted block begin\n");
   cur_func = 3;
   void *ptr;
 
@@ -221,6 +222,7 @@ static void *find_fitted_block(size_t block_size) {
     if (free_block_cnt > MAX_SEARCH_FREE_BLOCK && best_ptr != NULL)
       break;
   }
+  // printf("find fitted block end\n");
   return best_ptr;
 #endif
 
@@ -228,6 +230,7 @@ static void *find_fitted_block(size_t block_size) {
 }
 
 static void set_block(void *ptr, size_t block_size) {
+  // printf("set block begin\n");
   cur_func = 4;
   size_t current_block_size = GET_SIZE(HEADER(ptr));
   remove_free_block(ptr);
@@ -240,7 +243,6 @@ static void set_block(void *ptr, size_t block_size) {
     ptr = NEXT_BLOCK(ptr);
     WRITE(HEADER(ptr), PACK(current_block_size - block_size, 0));
     WRITE(FOOTER(ptr), PACK(current_block_size - block_size, 0));
-    SET_PREV_FREE_BLOCK(ptr, 0);
     SET_NEXT_FREE_BLOCK(ptr, 0);
     merge_block(ptr);
   } else {
@@ -248,67 +250,70 @@ static void set_block(void *ptr, size_t block_size) {
     WRITE(HEADER(ptr), PACK(current_block_size, 1));
     WRITE(FOOTER(ptr), PACK(current_block_size, 1));
   }
+  // printf("set block end\n");
 }
 
 static void remove_free_block(void *ptr) {
+  // printf("remove free block at %p begin\n", ptr);
+  // printf("free list at %p\n", free_list);
+  // printf("alloc bit %d\n", GET_ALLOC(HEADER(ptr)));
   if (ptr == NULL || GET_ALLOC(HEADER(ptr)) == 1)
     return;
-
-  void *prev_free_block = GET_PREV_FREE_BLOCK(ptr);
-  void *next_free_block = GET_NEXT_FREE_BLOCK(ptr);
-
-  if (prev_free_block == NULL && next_free_block == NULL) {
-    free_list = NULL;
-  } else if (prev_free_block == NULL) {
-    free_list = next_free_block;
-    SET_PREV_FREE_BLOCK(next_free_block, 0);
-  } else if (next_free_block == NULL) {
-    SET_NEXT_FREE_BLOCK(prev_free_block, 0);
-  } else {
-    SET_NEXT_FREE_BLOCK(prev_free_block, (long)next_free_block);
-    SET_PREV_FREE_BLOCK(next_free_block, (long)prev_free_block);
+  if (free_list == ptr) {
+    // printf("next free block at %p\n", (char *)GET_NEXT_FREE_BLOCK(ptr));
+    free_list = (char *)GET_NEXT_FREE_BLOCK(ptr);
+    return;
   }
+  void *pre_ptr = free_list;
+  while (pre_ptr != NULL && GET_NEXT_FREE_BLOCK(pre_ptr) != ptr) {
+    // printf("previous free block at %p, next free block at %p", pre_ptr,
+    //        (char *)GET_NEXT_FREE_BLOCK(pre_ptr));
+    pre_ptr = GET_NEXT_FREE_BLOCK(pre_ptr);
+  }
+  SET_NEXT_FREE_BLOCK(pre_ptr, (long)GET_NEXT_FREE_BLOCK(ptr));
+  SET_NEXT_FREE_BLOCK(ptr, 0);
+  // printf("remove free block end\n");
 }
 
 static void insert_free_block(void *ptr) {
+  // printf("insert free block begin\n");
   if (ptr == NULL || GET_ALLOC(HEADER(ptr)) == 1) {
     return;
   }
 
   if (free_list == NULL) {
     free_list = ptr;
-    SET_PREV_FREE_BLOCK(ptr, 0);
     SET_NEXT_FREE_BLOCK(ptr, 0);
     return;
   }
 
-  SET_PREV_FREE_BLOCK(ptr, 0);
   SET_NEXT_FREE_BLOCK(ptr, (long)free_list);
-  SET_PREV_FREE_BLOCK(free_list, (long)ptr);
   free_list = ptr;
+  // printf("insert free block end\n");
 }
 
 /*
  * mm_init - Called when a new trace starts.
  */
 int mm_init(void) {
-  if ((heap_list = mem_sbrk(8 * WSIZE)) == (void *)-1)
+  // printf("mm_init begin\n");
+  if ((heap_list = mem_sbrk(6 * WSIZE)) == (void *)-1)
     return -1;
   // init heap
-  WRITE(heap_list, 0);
-  WRITE(heap_list + (1 * WSIZE), PACK(BSIZE, 1));
+  WRITE(heap_list, PACK(2 * DSIZE, 1));
+  WRITE(heap_list + (1 * WSIZE), 0);
   WRITE(heap_list + (2 * WSIZE), 0);
-  WRITE(heap_list + (3 * WSIZE), 0);
-  WRITE(heap_list + (4 * WSIZE), PACK(BSIZE, 1));
-  WRITE(heap_list + (5 * WSIZE), PACK(0, 1));
-  WRITE(heap_list + (6 * WSIZE), 0);
-  WRITE(heap_list + (7 * WSIZE), 0);
-  heap_list += BSIZE;
+  // printf("write at %p\n", heap_list + (3 * WSIZE));
+  WRITE(heap_list + (3 * WSIZE), PACK(2 * DSIZE, 1));
+  WRITE(heap_list + (4 * WSIZE), PACK(0, 1));
+  WRITE(heap_list + (5 * WSIZE), 0);
+  heap_list += DSIZE;
   free_list = NULL;
 
   // extend heap
   if (extend_heap(CHUNKSIZE) == NULL)
     return -1;
+  // printf("mm_init end\n");
   return 0;
 }
 
@@ -316,6 +321,7 @@ int mm_init(void) {
  * malloc - Allocate a block by strategy in find_fit().
  */
 void *malloc(size_t size) {
+  // printf("malloc begin\n");
   // block_size includes header and footer
   size_t block_size;
   size_t extend_size;
@@ -325,10 +331,11 @@ void *malloc(size_t size) {
     return NULL;
   }
 
-  block_size = DSIZE * ((size - 1 + DSIZE) / DSIZE) + BSIZE;
+  block_size = DSIZE * ((size - 1 + DSIZE + BSIZE) / DSIZE);
 
   if ((ptr = find_fitted_block(block_size)) != NULL) {
     set_block(ptr, block_size);
+    // printf("malloc end\n");
     return ptr;
   }
 
@@ -339,6 +346,7 @@ void *malloc(size_t size) {
     return NULL;
   }
   set_block(ptr, block_size);
+  // printf("malloc end\n");
   return ptr;
 }
 
@@ -347,15 +355,16 @@ void *malloc(size_t size) {
  * or next block.
  */
 void free(void *ptr) {
+  // printf("free begin\n");
   if (ptr == NULL)
     return;
   size_t size = GET_SIZE(HEADER(ptr));
 
   WRITE(HEADER(ptr), PACK(size, 0));
   WRITE(FOOTER(ptr), PACK(size, 0));
-  SET_PREV_FREE_BLOCK(ptr, 0);
   SET_NEXT_FREE_BLOCK(ptr, 0);
   merge_block(ptr);
+  // printf("free end\n");
 }
 
 /*
@@ -363,6 +372,7 @@ void free(void *ptr) {
  * new block, copying its data, and freeing the old block.
  */
 void *realloc(void *oldptr, size_t size) {
+  // printf("realloc begin\n");
   if (oldptr == NULL) {
     return malloc(size);
   }
@@ -380,6 +390,7 @@ void *realloc(void *oldptr, size_t size) {
     copySize = size;
   memcpy(newptr, oldptr, copySize - BSIZE);
   free(oldptr);
+  // printf("realloc end\n");
   return newptr;
 }
 
@@ -399,21 +410,23 @@ void *calloc(size_t nmemb, size_t size) {
 /*
  * mm_checkheap - Check the heap.
  * The constant of the heap is as follows.
- * 1. The prologue block is BSIZE(16 byte) and allocated(prevent merge).
+ * 1. The prologue block is 16 byte and allocated(prevent merge).
  * 2. The epilogue block is 0 byte and allocated(prevent merge).
  * 3. The block size is multiple of BSIZE(8 byte).
  * 4. The pointer heap_list is 16 byte after mem_heap_lo().
  */
 void mm_checkheap(int verbose) {
   /*Get gcc to be quiet. */
+  // printf("mm_checkheap begin\n");
   verbose = verbose;
 
   char *ptr;
 
   // check epilogue and prologue blocks
-  if (GET_SIZE(HEADER(heap_list)) != BSIZE ||
+  if (GET_SIZE(HEADER(heap_list)) != 2 * DSIZE ||
       GET_ALLOC(HEADER(heap_list)) != 1 ||
-      GET_SIZE(FOOTER(heap_list)) != BSIZE || GET_ALLOC(FOOTER(heap_list)) != 1)
+      GET_SIZE(FOOTER(heap_list)) != 2 * DSIZE ||
+      GET_ALLOC(FOOTER(heap_list)) != 1)
     printf("Prologue block error\n");
 
   ptr = heap_list;
@@ -424,7 +437,7 @@ void mm_checkheap(int verbose) {
     printf("Epilogue block error\n");
 
   // check the boundary of heap
-  if (mem_heap_lo() + BSIZE != heap_list) {
+  if (mem_heap_lo() + DSIZE != heap_list) {
     printf("mem_heap_lo: %p, heap_head: %p\n", mem_heap_lo(), heap_list);
     printf("Heap boundary error\n");
   }
@@ -481,10 +494,6 @@ void mm_checkheap(int verbose) {
     if (GET_ALLOC(HEADER(ptr)) != 0)
       printf("Allocated block in the free list at %p\n", ptr);
 
-    if (GET_PREV_FREE_BLOCK(ptr) != NULL &&
-        (char *)GET_NEXT_FREE_BLOCK(GET_PREV_FREE_BLOCK(ptr)) != ptr)
-      printf("Prev and next pointer error at %p\n", ptr);
-
     void *tmp = heap_list;
     while (GET_SIZE(HEADER(ptr)) != 0) {
       if (tmp == ptr)
@@ -495,4 +504,6 @@ void mm_checkheap(int verbose) {
       printf("Block in free list is not in the heap\n");
     ptr = (char *)GET_NEXT_FREE_BLOCK(ptr);
   }
+
+  // printf("mm_checkheap end\n");
 }
