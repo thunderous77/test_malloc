@@ -94,7 +94,7 @@
 #define FIRST_BEST_FIT
 
 #ifdef FIRST_BEST_FIT
-#define MAX_SEARCH_FREE_BLOCK 1
+#define MAX_SEARCH_FREE_BLOCK 3
 #endif
 
 static char *heap_list;
