@@ -1,7 +1,7 @@
 /*
- * mm-EFL.c - modify on the basis of mm-EFL-base.c, change the double linked
- * list of free block to a single linked list. The performance is a little
- * better than mm-EFL.c(score 92).
+ * mm-SFL.c - modify on the basis of mm-EFL-base.c, change explicit free list to
+ * segregated free list. The performance is a little better than mm-EFL.c(score
+ * 92).
  */
 #include <assert.h>
 #include <stddef.h>
@@ -43,6 +43,7 @@
 #define DSIZE 8            /* double word size (bytes) */
 #define BSIZE 12           /* empty block size (bytes) */
 #define CHUNKSIZE (1 << 8) /* extend heap size (bytes) */
+#define CLASSNUM 2         /* number of classes -- (0,16], (17, 32] ... */
 #define MAX(x, y) ((x) > (y) ? (x) : (y))
 
 #define PACK(size, alloc)                                                      \
@@ -79,18 +80,26 @@
        ? (WRITE(((char *)(ptr)-WSIZE), (val)))                                 \
        : (WRITE(((char *)(ptr)-WSIZE),                                         \
                 (val - (long)(heap_list))))) /* set next free block ptr */
+#define GET_CLASS_HEAD(num)                                                    \
+  (READ((char *)(heap_list) + (num)*WSIZE)) == 0                               \
+      ? NULL                                                                   \
+      : ((int *)((long)(READ((char *)(heap_list) + (num)*WSIZE)) +             \
+                 (long)(heap_list)))
+/* get the head address of the class list */
+#define SET_CLASS_HEAD(num, val)                                               \
+  (val == 0 ? (WRITE(((char *)(heap_list) + (num)*WSIZE), (val)))              \
+            : (WRITE(((char *)(heap_list) + (num)*WSIZE),                      \
+                     (val - (long)(heap_list))))) /* set the head address of   \
+                                                     the class list */
 
 /* select fit strategy */
-// #define FIRST_FIT
-// #define BEST_FIT
 #define FIRST_BEST_FIT
 
 #ifdef FIRST_BEST_FIT
-#define MAX_SEARCH_FREE_BLOCK 10
+#define MAX_SEARCH_FREE_BLOCK 7
 #endif
 
 static char *heap_list;
-static char *free_list = NULL;
 
 // debug
 int cur_func, pre_func;
@@ -116,6 +125,9 @@ static void remove_free_block(void *ptr);
 // insert the block to the free list
 static void insert_free_block(void *ptr);
 
+// search the belonged class and return the class number (base 0)
+static int search_class(int size);
+
 static void *extend_heap(size_t heap_size) {
   // printf("extend heap begin\n");
   cur_func = 1;
@@ -140,7 +152,7 @@ static void *merge_block(void *ptr) {
   // printf("merge block begin at %p\n", ptr);
   cur_func = 2;
   // printf("read at %p,size is %d\n", (char *)ptr - BSIZE,
-  //        GET_SIZE((char *)ptr - BSIZE));
+  //  GET_SIZE((char *)ptr - BSIZE));
   // printf("previous block at %p, size %d, alloc %d\n", PREV_BLOCK(ptr),
   //        GET_SIZE(HEADER(PREV_BLOCK(ptr))),
   //        GET_ALLOC(HEADER(PREV_BLOCK(ptr))));
@@ -181,38 +193,31 @@ static void *merge_block(void *ptr) {
 
 static void *find_fitted_block(size_t block_size) {
   // printf("find fitted block begin\n");
+  // printf("find fitted block begin, size %d\n", block_size);
+  // for (int i = 0; i < CLASSNUM; i++) {
+  //   if ((GET_CLASS_HEAD(i)) != NULL) {
+  //     int cnt = 0;
+  //     int *ptr = GET_CLASS_HEAD(i);
+  //     while (ptr != NULL) {
+  //       cnt++;
+  //       ptr = GET_NEXT_FREE_BLOCK(ptr);
+  //     }
+  //     printf("class %d, free block cnt %d\n", i, cnt);
+  //   }
+  // }
   cur_func = 3;
   void *ptr;
 
-  /* first fit */
-#ifdef FIRST_FIT
-  for (ptr = free_list; ptr != NULL; ptr = GET_NEXT_FREE_BLOCK(ptr)) {
-    if (GET_SIZE(HEADER(ptr)) >= block_size) {
-      return ptr;
-    }
-  }
-#endif
-
-  /* best fit */
-#ifdef BEST_FIT
-  char *best_ptr = NULL;
-  size_t min_size = 0;
-  for (ptr = free_list; ptr != NULL; ptr = GET_NEXT_FREE_BLOCK(ptr)) {
-    if (GET_SIZE(HEADER(ptr)) >= block_size) {
-      if (min_size == 0 || GET_SIZE(HEADER(ptr)) < min_size) {
-        best_ptr = ptr;
-        min_size = GET_SIZE(HEADER(ptr));
-      }
-    }
-  }
-  return best_ptr;
-#endif
-
 #ifdef FIRST_BEST_FIT
+  int class_num = search_class(block_size);
   char *best_ptr = NULL;
   size_t min_size = 0, free_block_cnt = 0;
-  for (ptr = free_list; ptr != NULL;
-       ptr = GET_NEXT_FREE_BLOCK(ptr), free_block_cnt++) {
+  for (int i = class_num; i < CLASSNUM; i++) {
+    if ((ptr = GET_CLASS_HEAD(i)) != NULL) {
+      break;
+    }
+  }
+  for (; ptr != NULL; ptr = GET_NEXT_FREE_BLOCK(ptr), free_block_cnt++) {
     if (GET_SIZE(HEADER(ptr)) >= block_size) {
       if (min_size == 0 || GET_SIZE(HEADER(ptr)) < min_size) {
         best_ptr = ptr;
@@ -223,6 +228,7 @@ static void *find_fitted_block(size_t block_size) {
       break;
   }
   // printf("find fitted block end\n");
+  // printf("find fitted block end, best ptr size %d\n", min_size);
   return best_ptr;
 #endif
 
@@ -230,7 +236,7 @@ static void *find_fitted_block(size_t block_size) {
 }
 
 static void set_block(void *ptr, size_t block_size) {
-  // printf("set block begin\n");
+  // printf("set block at %p begin\n", ptr);
   cur_func = 4;
   size_t current_block_size = GET_SIZE(HEADER(ptr));
   remove_free_block(ptr);
@@ -255,15 +261,23 @@ static void set_block(void *ptr, size_t block_size) {
 
 static void remove_free_block(void *ptr) {
   // printf("remove free block at %p begin\n", ptr);
-  // printf("free list at %p\n", free_list);
-  // printf("alloc bit %d\n", GET_ALLOC(HEADER(ptr)));
   if (ptr == NULL || GET_ALLOC(HEADER(ptr)) == 1)
     return;
+
+  int class_num = search_class(GET_SIZE(HEADER(ptr)));
+  char *free_list = (char *)(GET_CLASS_HEAD(class_num));
+  // printf("block size %d, class number is %d\n", GET_SIZE(HEADER(ptr)),
+  //        search_class(GET_SIZE(HEADER(ptr))));
+  // printf("free list at %p\n", free_list);
   if (free_list == ptr) {
     // printf("next free block at %p\n", (char *)GET_NEXT_FREE_BLOCK(ptr));
     free_list = (char *)GET_NEXT_FREE_BLOCK(ptr);
+    // printf("set class %d head to %p\n", class_num, free_list);
+    SET_CLASS_HEAD(class_num, (long)free_list);
+    // printf("remove free block end\n");
     return;
   }
+
   void *pre_ptr = free_list;
   while (pre_ptr != NULL && GET_NEXT_FREE_BLOCK(pre_ptr) != ptr) {
     // printf("previous free block at %p, next free block at %p", pre_ptr,
@@ -276,20 +290,35 @@ static void remove_free_block(void *ptr) {
 }
 
 static void insert_free_block(void *ptr) {
-  // printf("insert free block begin\n");
+  // printf("insert free block at %p begin\n", ptr);
   if (ptr == NULL || GET_ALLOC(HEADER(ptr)) == 1) {
     return;
   }
 
+  int class_num = search_class(GET_SIZE(HEADER(ptr)));
+  char *free_list = (char *)(GET_CLASS_HEAD(class_num));
+  // printf("block size %d, class number is %d\n", GET_SIZE(HEADER(ptr)),
+  //  search_class(GET_SIZE(HEADER(ptr))));
+  // printf("free list at %p\n", free_list);
+
   if (free_list == NULL) {
-    free_list = ptr;
+    SET_CLASS_HEAD(class_num, (long)ptr);
     SET_NEXT_FREE_BLOCK(ptr, 0);
     return;
   }
 
   SET_NEXT_FREE_BLOCK(ptr, (long)free_list);
-  free_list = ptr;
+  SET_CLASS_HEAD(class_num, (long)ptr);
   // printf("insert free block end\n");
+}
+
+static int search_class(int size) {
+  int i;
+  for (i = 4; i < 4 + CLASSNUM; i++) {
+    if (size <= (1 << i))
+      return i - 4;
+  }
+  return CLASSNUM - 1;
 }
 
 /*
@@ -297,18 +326,18 @@ static void insert_free_block(void *ptr) {
  */
 int mm_init(void) {
   // printf("mm_init begin\n");
-  if ((heap_list = mem_sbrk(6 * WSIZE)) == (void *)-1)
+  if ((heap_list = mem_sbrk((6 + CLASSNUM) * WSIZE)) == (void *)-1)
     return -1;
   // init heap
-  WRITE(heap_list, PACK(2 * DSIZE, 1));
-  WRITE(heap_list + (1 * WSIZE), 0);
-  WRITE(heap_list + (2 * WSIZE), 0);
-  // printf("write at %p\n", heap_list + (3 * WSIZE));
-  WRITE(heap_list + (3 * WSIZE), PACK(2 * DSIZE, 1));
-  WRITE(heap_list + (4 * WSIZE), PACK(0, 1));
-  WRITE(heap_list + (5 * WSIZE), 0);
-  heap_list += DSIZE;
-  free_list = NULL;
+  for (int i = 0; i < CLASSNUM; i++) {
+    WRITE(heap_list + (i * WSIZE), 0);
+  }
+  WRITE(heap_list + CLASSNUM * WSIZE, PACK(2 * DSIZE, 1));
+  WRITE(heap_list + CLASSNUM * WSIZE + (1 * WSIZE), 0);
+  WRITE(heap_list + CLASSNUM * WSIZE + (2 * WSIZE), 0);
+  WRITE(heap_list + CLASSNUM * WSIZE + (3 * WSIZE), PACK(2 * DSIZE, 1));
+  WRITE(heap_list + CLASSNUM * WSIZE + (4 * WSIZE), PACK(0, 1));
+  WRITE(heap_list + CLASSNUM * WSIZE + (5 * WSIZE), 0);
 
   // extend heap
   if (extend_heap(CHUNKSIZE) == NULL)
@@ -331,7 +360,7 @@ void *malloc(size_t size) {
     return NULL;
   }
 
-  block_size = DSIZE * ((size - 1 + DSIZE + BSIZE) / DSIZE);
+  block_size = ALIGN(size + BSIZE);
 
   if ((ptr = find_fitted_block(block_size)) != NULL) {
     set_block(ptr, block_size);
@@ -420,16 +449,24 @@ void mm_checkheap(int verbose) {
   // printf("mm_checkheap begin\n");
   verbose = verbose;
 
-  char *ptr;
+  char *ptr, *heap_list_shadow;
+  heap_list_shadow = heap_list + CLASSNUM * WSIZE + 2 * WSIZE;
 
   // check epilogue and prologue blocks
-  if (GET_SIZE(HEADER(heap_list)) != 2 * DSIZE ||
-      GET_ALLOC(HEADER(heap_list)) != 1 ||
-      GET_SIZE(FOOTER(heap_list)) != 2 * DSIZE ||
-      GET_ALLOC(FOOTER(heap_list)) != 1)
+  if (GET_SIZE(HEADER(heap_list_shadow)) != 2 * DSIZE ||
+      GET_ALLOC(HEADER(heap_list_shadow)) != 1 ||
+      GET_SIZE(FOOTER(heap_list_shadow)) != 2 * DSIZE ||
+      GET_ALLOC(FOOTER(heap_list_shadow)) != 1) {
     printf("Prologue block error\n");
+    printf("head size: %d, head alloc: %d\n",
+           GET_SIZE(HEADER(heap_list_shadow)),
+           GET_ALLOC(HEADER(heap_list_shadow)));
+    printf("foot size: %d, foot alloc: %d\n",
+           GET_SIZE(FOOTER(heap_list_shadow)),
+           GET_ALLOC(FOOTER(heap_list_shadow)));
+  }
 
-  ptr = heap_list;
+  ptr = heap_list_shadow;
   while (GET_SIZE(HEADER(ptr)) != 0) {
     ptr = NEXT_BLOCK(ptr);
   }
@@ -437,7 +474,7 @@ void mm_checkheap(int verbose) {
     printf("Epilogue block error\n");
 
   // check the boundary of heap
-  if (mem_heap_lo() + DSIZE != heap_list) {
+  if (mem_heap_lo() != heap_list) {
     printf("mem_heap_lo: %p, heap_head: %p\n", mem_heap_lo(), heap_list);
     printf("Heap boundary error\n");
   }
@@ -447,7 +484,7 @@ void mm_checkheap(int verbose) {
   }
 
   // check the header and footer of each block
-  ptr = heap_list;
+  ptr = heap_list_shadow;
   while (GET_SIZE(HEADER(ptr)) != 0) {
     // check the consistency of prev and next pointers
     if (PREV_BLOCK(NEXT_BLOCK(ptr)) != ptr) {
@@ -467,7 +504,7 @@ void mm_checkheap(int verbose) {
     // check the continuous of heap
     if (ptr + GET_SIZE(HEADER(ptr)) != NEXT_BLOCK(ptr))
       printf("Block continuous error 1\n");
-    if (ptr != heap_list) {
+    if (ptr != heap_list_shadow) {
       if (FOOTER(PREV_BLOCK(ptr)) != ptr - BSIZE)
         printf("Block continuous error 2\n");
     }
@@ -476,33 +513,38 @@ void mm_checkheap(int verbose) {
   }
 
   // check merge
-  int cnt = 0;
-  ptr = heap_list;
+  ptr = heap_list_shadow;
   while (GET_SIZE(HEADER(ptr)) != 0) {
-    if (GET_ALLOC(HEADER(ptr)) == 0 && GET_ALLOC(HEADER(NEXT_BLOCK(ptr))) == 0)
-      printf("Merge error at block %p\n", ptr);
+    if (GET_SIZE(HEADER(NEXT_BLOCK(ptr))) != 0) {
+      if (GET_ALLOC(HEADER(ptr)) == 0 &&
+          GET_ALLOC(HEADER(NEXT_BLOCK(ptr))) == 0)
+        printf("Merge error at block %p\n", ptr);
+    }
     ptr = NEXT_BLOCK(ptr);
-    cnt++;
   }
 
   // check the free list
-  ptr = free_list;
-  while (ptr != NULL) {
-    if (!((char *)mem_heap_lo() < ptr && ptr < (char *)mem_heap_hi()))
-      printf("Free list boundary error\n");
+  for (int i = 0; i < CLASSNUM; i++) {
+    // printf("class num: %d\n", i);
+    ptr = (char *)(GET_CLASS_HEAD(i));
+    while (ptr != NULL) {
+      // printf("ptr: %p\n", ptr);
+      if (!((char *)mem_heap_lo() < ptr && ptr < (char *)mem_heap_hi()))
+        printf("Free list boundary error\n");
 
-    if (GET_ALLOC(HEADER(ptr)) != 0)
-      printf("Allocated block in the free list at %p\n", ptr);
+      if (GET_ALLOC(HEADER(ptr)) != 0)
+        printf("Allocated block in the free list at %p\n", ptr);
 
-    void *tmp = heap_list;
-    while (GET_SIZE(HEADER(ptr)) != 0) {
-      if (tmp == ptr)
-        break;
-      tmp = NEXT_BLOCK(tmp);
+      void *tmp = heap_list_shadow;
+      while (GET_SIZE(HEADER(ptr)) != 0) {
+        if (tmp == ptr)
+          break;
+        tmp = NEXT_BLOCK(tmp);
+      }
+      if (GET_SIZE(HEADER(tmp)) == 0)
+        printf("Block in free list is not in the heap\n");
+      ptr = (char *)GET_NEXT_FREE_BLOCK(ptr);
     }
-    if (GET_SIZE(HEADER(tmp)) == 0)
-      printf("Block in free list is not in the heap\n");
-    ptr = (char *)GET_NEXT_FREE_BLOCK(ptr);
   }
 
   // printf("mm_checkheap end\n");
